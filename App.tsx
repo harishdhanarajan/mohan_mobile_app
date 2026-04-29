@@ -10,33 +10,34 @@ import {
   Pressable,
   SafeAreaView,
   ScrollView,
+  StatusBar as RNStatusBar,
   StyleSheet,
   Text,
   TextInput,
   View
 } from "react-native";
 import { supabase } from "./src/supabase";
-import { bootstrapAdminProfile, loadProfileByAuthUser, loadWorkspace, signOut } from "./src/api";
+import { loadProfileByAuthUser, loadWorkspace, signIn, signOut } from "./src/api";
 import { COLORS, FONT, RADIUS, SIZES, SHADOW } from "./src/theme";
-import { ACTIVE_STATUSES, PRIORITY_LABELS, STATUS_LABELS, STATUS_ORDER, dayOffset, formatDue, formatRelTime, id, initials, todayISO } from "./src/utils";
+import { PRIORITY_LABELS, STATUS_LABELS, STATUS_ORDER, dayOffset, formatDue, formatRelTime, id, initials, nowTimestamp, todayISO } from "./src/utils";
 import type { Priority, Profile, Project, Status, Task, WorkspaceState } from "./src/types";
 
 type ToastKind = "error" | "success" | "info";
 type ToastItem = { id: string; message: string; kind: ToastKind };
-type TabId = "dashboard" | "tasks" | "board" | "team" | "projects";
+type TabId = "dashboard" | "tasks" | "board" | "calendar" | "team";
 
 const ADMIN_TABS: { id: TabId; label: string; icon: keyof typeof MaterialIcons.glyphMap }[] = [
   { id: "dashboard", label: "Dashboard", icon: "space-dashboard" },
   { id: "tasks", label: "Tasks", icon: "checklist" },
   { id: "board", label: "Board", icon: "view-kanban" },
-  { id: "team", label: "Team", icon: "groups" },
-  { id: "projects", label: "Projects", icon: "folder" }
+  { id: "calendar", label: "Calendar", icon: "event" },
+  { id: "team", label: "Team", icon: "groups" }
 ];
 
 const USER_TABS: { id: TabId; label: string; icon: keyof typeof MaterialIcons.glyphMap }[] = [
   { id: "tasks", label: "Tasks", icon: "checklist" },
   { id: "board", label: "Board", icon: "view-kanban" },
-  { id: "projects", label: "Projects", icon: "folder" }
+  { id: "calendar", label: "Calendar", icon: "event" }
 ];
 
 const INITIAL_TASK_FORM = {
@@ -59,15 +60,10 @@ function badgeColor(priority: Priority) {
 }
 
 function statusColor(status: Status) {
-  if (status === "todo") return COLORS.todo;
   if (status === "in-progress") return COLORS.progress;
   if (status === "review") return COLORS.review;
   if (status === "done") return COLORS.done;
-  return COLORS.blocked;
-}
-
-function isActiveStatus(status: Status) {
-  return ACTIVE_STATUSES.includes(status);
+  return COLORS.todo;
 }
 
 function sortTasks(list: Task[]) {
@@ -82,7 +78,7 @@ function sortTasks(list: Task[]) {
 
 function useSession() {
   const [ready, setReady] = React.useState(false);
-  const [session, setSession] = React.useState<Awaited<ReturnType<typeof supabase.auth.getSession>>["data"]["session"] | null>(null);
+  const [authUserId, setAuthUserId] = React.useState<string | null>(null);
   const [profile, setProfile] = React.useState<Profile | null>(null);
   const [workspace, setWorkspace] = React.useState<WorkspaceState>(EMPTY_WORKSPACE);
   const [error, setError] = React.useState<string | null>(null);
@@ -94,15 +90,19 @@ function useSession() {
 
   React.useEffect(() => {
     let mounted = true;
-    const sync = async () => {
-      const { data } = await supabase.auth.getSession();
-      if (!mounted) return;
-      setSession(data.session);
-      setReady(true);
-    };
-    sync().catch(e => setError(e?.message || String(e)));
+    supabase.auth.getSession()
+      .then(({ data }) => {
+        if (!mounted) return;
+        setAuthUserId(data.session?.user.id || null);
+        setReady(true);
+      })
+      .catch(e => {
+        if (!mounted) return;
+        setError(e?.message || String(e));
+        setReady(true);
+      });
     const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
+      setAuthUserId(nextSession?.user.id || null);
     });
     return () => {
       mounted = false;
@@ -111,22 +111,34 @@ function useSession() {
   }, []);
 
   React.useEffect(() => {
-    if (!session?.user.id) {
+    if (!authUserId) {
       setProfile(null);
       setWorkspace(EMPTY_WORKSPACE);
       return;
     }
-    loadProfileByAuthUser(session.user.id)
-      .then(setProfile)
+    loadProfileByAuthUser(authUserId)
+      .then(p => {
+        if (!p) {
+          setError("This account has no profile yet. Ask your admin to provision it.");
+          supabase.auth.signOut().catch(() => undefined);
+          return;
+        }
+        if (p.role !== "user") {
+          setError("Admin accounts must sign in on the desktop app.");
+          supabase.auth.signOut().catch(() => undefined);
+          return;
+        }
+        setProfile(p);
+      })
       .catch(e => setError(e?.message || String(e)));
-  }, [session?.user.id]);
+  }, [authUserId]);
 
   React.useEffect(() => {
     if (!profile) return;
     reloadWorkspace().catch(e => setError(e?.message || String(e)));
   }, [profile, reloadWorkspace]);
 
-  return { ready, session, profile, workspace, setWorkspace, reloadWorkspace, error, setError };
+  return { ready, profile, setProfile, workspace, setWorkspace, reloadWorkspace, error, setError };
 }
 
 function AppButton(props: { label: string; onPress?: () => void; variant?: "primary" | "secondary" | "ghost" | "danger"; icon?: keyof typeof MaterialIcons.glyphMap; disabled?: boolean }) {
@@ -205,9 +217,7 @@ function ErrorScreen({ message }: { message: string }) {
   );
 }
 
-function AuthScreen(props: { onSignedIn: () => void; onToast: (message: string, kind?: ToastKind) => void }) {
-  const [isSetup, setIsSetup] = React.useState(true);
-  const [name, setName] = React.useState("");
+function AuthScreen(props: { onToast: (message: string, kind?: ToastKind) => void }) {
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [busy, setBusy] = React.useState(false);
@@ -218,28 +228,11 @@ function AuthScreen(props: { onSignedIn: () => void; onToast: (message: string, 
       props.onToast("Email and password are required.");
       return;
     }
-    if (isSetup && !name.trim()) {
-      props.onToast("Name is required for the initial admin setup.");
-      return;
-    }
     setBusy(true);
     try {
-      if (isSetup) {
-        const { data, error } = await supabase.auth.signUp({ email: cleanEmail, password });
-        if (error) throw error;
-        if (!data.session?.user.id) {
-          props.onToast("Check the email confirmation inbox, then sign in again.", "info");
-          setIsSetup(false);
-          return;
-        }
-        await bootstrapAdminProfile({ authUserId: data.session.user.id, name: name.trim(), email: cleanEmail, password });
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
-        if (error) throw error;
-      }
-      props.onSignedIn();
+      await signIn(cleanEmail, password);
     } catch (e: any) {
-      props.onToast(e?.message || "Authentication failed.");
+      props.onToast(e?.message || "Sign in failed.");
     } finally {
       setBusy(false);
     }
@@ -257,17 +250,7 @@ function AuthScreen(props: { onSignedIn: () => void; onToast: (message: string, 
             </View>
           </View>
 
-          <Text style={styles.authTitle}>{isSetup ? "Create the first admin account" : "Sign in to MYT"}</Text>
-          <Text style={styles.authSub}>
-            {isSetup ? "This creates the first workspace admin in Supabase Auth." : "Open your workspace and continue where you left off."}
-          </Text>
-
-          {isSetup && (
-            <View style={styles.field}>
-              <Text style={styles.fieldLabel}>Name</Text>
-              <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="Full name" placeholderTextColor={COLORS.textMuted} />
-            </View>
-          )}
+          <Text style={styles.authTitle}>Sign in to MYT</Text>
 
           <View style={styles.field}>
             <Text style={styles.fieldLabel}>Email</Text>
@@ -279,20 +262,7 @@ function AuthScreen(props: { onSignedIn: () => void; onToast: (message: string, 
             <TextInput style={styles.input} value={password} onChangeText={setPassword} placeholder="Password" secureTextEntry placeholderTextColor={COLORS.textMuted} />
           </View>
 
-          <AppButton label={busy ? "Working..." : isSetup ? "Create account" : "Sign in"} onPress={submit} disabled={busy} />
-          <AppButton
-            label={isSetup ? "I already have an account" : "Set up first admin"}
-            variant="ghost"
-            onPress={() => setIsSetup(v => !v)}
-          />
-        </View>
-
-        <View style={styles.authArt}>
-          <View style={styles.authArtCard}>
-            <Text style={styles.authArtLabel}>Workspace</Text>
-            <Text style={styles.authArtHeadline}>Clean, fast, task-first mobile operations.</Text>
-            <Text style={styles.authArtText}>Admin setup, tasks, projects, comments, and review flow in one Android app backed by Supabase Auth.</Text>
-          </View>
+          <AppButton label={busy ? "Signing in..." : "Sign in"} onPress={submit} disabled={busy} />
         </View>
       </View>
     </ScrollView>
@@ -326,6 +296,54 @@ function TaskRow(props: { task: Task; users: Profile[]; projects: Project[]; onO
   );
 }
 
+function ProjectGroupedTasks(props: { tasks: Task[]; users: Profile[]; projects: Project[]; onOpen: (task: Task) => void; onToggleDone?: (task: Task) => void }) {
+  const sections = React.useMemo(() => {
+    const groups = new Map<string, { project: Project | null; tasks: Task[] }>();
+
+    props.tasks.forEach(task => {
+      const project = props.projects.find(item => item.id === task.projectId) || null;
+      const key = project?.id || "__no_project__";
+      const current = groups.get(key) || { project, tasks: [] };
+      current.tasks.push(task);
+      groups.set(key, current);
+    });
+
+    return Array.from(groups.values()).sort((a, b) => {
+      if (!a.project && b.project) return 1;
+      if (a.project && !b.project) return -1;
+      return (a.project?.name || "No project").localeCompare(b.project?.name || "No project");
+    });
+  }, [props.projects, props.tasks]);
+
+  if (!sections.length) return <Text style={styles.bodyMuted}>No tasks match.</Text>;
+
+  return (
+    <View style={styles.projectTaskList}>
+      {sections.map(section => (
+        <View key={section.project?.id || "no-project"} style={styles.projectTaskSection}>
+          <View style={styles.projectTaskHead}>
+            <View style={[styles.projectSwatch, { backgroundColor: section.project?.color || COLORS.textMuted }]} />
+            <Text style={styles.projectTaskTitle}>{section.project?.name || "No project"}</Text>
+            <Text style={styles.projectTaskCount}>{section.tasks.length}</Text>
+          </View>
+          <View style={{ gap: 10 }}>
+            {section.tasks.map(task => (
+              <TaskRow
+                key={task.id}
+                task={task}
+                users={props.users}
+                projects={props.projects}
+                onOpen={props.onOpen}
+                onToggleDone={props.onToggleDone}
+              />
+            ))}
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 function TaskModal(props: {
   visible: boolean;
   task: Task | null;
@@ -342,7 +360,41 @@ function TaskModal(props: {
   const [busy, setBusy] = React.useState(false);
   const [comment, setComment] = React.useState("");
   const [editing, setEditing] = React.useState(isNew);
+  const [editingCommentId, setEditingCommentId] = React.useState<string | null>(null);
+  const [editingCommentText, setEditingCommentText] = React.useState("");
   const [form, setForm] = React.useState({ ...INITIAL_TASK_FORM });
+
+  const startEditComment = (commentId: string, currentText: string) => {
+    setEditingCommentId(commentId);
+    setEditingCommentText(currentText);
+  };
+  const cancelEditComment = () => {
+    setEditingCommentId(null);
+    setEditingCommentText("");
+  };
+  const saveEditComment = async () => {
+    if (!props.task || !editingCommentId) return;
+    const trimmed = editingCommentText.trim();
+    if (!trimmed) return;
+    const updated: Task = {
+      ...props.task,
+      comments: props.task.comments.map(c =>
+        c.id === editingCommentId ? { ...c, text: trimmed } : c
+      ),
+      activity: [...props.task.activity, {
+        ts: nowTimestamp(),
+        actor: props.currentUser.id,
+        text: "edited a comment"
+      }]
+    };
+    setBusy(true);
+    try {
+      await props.onSave(updated);
+      cancelEditComment();
+    } finally {
+      setBusy(false);
+    }
+  };
 
   React.useEffect(() => {
     if (!props.task) {
@@ -379,11 +431,16 @@ function TaskModal(props: {
       props.onToast("Add at least one comment before closing this task as done.");
       return;
     }
+    const admin = props.workspace.users.find(u => u.role === "admin");
+    if (form.status === "review" && !admin) {
+      props.onToast("No admin user is available to receive review tasks.");
+      return;
+    }
     const baseTask: Task = {
       id: form.id || id("t"),
       title: form.title.trim(),
       description: form.description.trim(),
-      assigneeId: form.status === "review" ? props.workspace.users.find(u => u.role === "admin")?.id || form.assigneeId : form.assigneeId,
+      assigneeId: form.status === "review" ? admin!.id : form.assigneeId,
       projectId: form.projectId || null,
       priority: form.priority,
       status: form.status,
@@ -392,7 +449,7 @@ function TaskModal(props: {
       tags: form.tagsText.split(",").map(s => s.trim()).filter(Boolean),
       attachments: props.task?.attachments || [],
       comments: props.task?.comments || [],
-      activity: [...(props.task?.activity || []), { ts: new Date().toISOString().slice(0, 16), actor: props.currentUser.id, text: isNew ? "created task" : "edited task details" }]
+      activity: [...(props.task?.activity || []), { ts: nowTimestamp(), actor: props.currentUser.id, text: isNew ? "created task" : "edited task details" }]
     };
     setBusy(true);
     try {
@@ -408,8 +465,8 @@ function TaskModal(props: {
     if (!text || !props.task) return;
     const updated: Task = {
       ...props.task,
-      comments: [...props.task.comments, { id: id("c"), authorId: props.currentUser.id, ts: new Date().toISOString().slice(0, 16), text }],
-      activity: [...props.task.activity, { ts: new Date().toISOString().slice(0, 16), actor: props.currentUser.id, text: "added a comment" }]
+      comments: [...props.task.comments, { id: id("c"), authorId: props.currentUser.id, ts: nowTimestamp(), text }],
+      activity: [...props.task.activity, { ts: nowTimestamp(), actor: props.currentUser.id, text: "added a comment" }]
     };
     setBusy(true);
     try {
@@ -474,7 +531,7 @@ function TaskModal(props: {
                   <PickerInput value={form.priority} options={["low", "medium", "high"].map(v => ({ label: PRIORITY_LABELS[v as Priority], value: v }))} onChange={v => setForm(f => ({ ...f, priority: v as Priority }))} />
                 </Field>
                 <Field label="Status">
-                  <PickerInput value={form.status} options={STATUS_ORDER.filter(s => s !== "blocked").map(v => ({ label: STATUS_LABELS[v], value: v }))} onChange={v => setForm(f => ({ ...f, status: v as Status, assigneeId: v === "review" ? props.workspace.users.find(u => u.role === "admin")?.id || f.assigneeId : f.assigneeId }))} />
+                  <DropdownInput value={form.status} options={STATUS_ORDER.map(v => ({ label: STATUS_LABELS[v], value: v }))} onChange={v => setForm(f => ({ ...f, status: v as Status, assigneeId: v === "review" ? props.workspace.users.find(u => u.role === "admin")?.id || f.assigneeId : f.assigneeId }))} />
                 </Field>
               </Row2>
               <Row2>
@@ -502,13 +559,15 @@ function TaskModal(props: {
               </View>
               <Text style={styles.fieldLabel}>Description</Text>
               <Text style={styles.body}>{props.task?.description || "No description."}</Text>
-              <View style={{ marginTop: 16, flexDirection: "row", gap: 8 }}>
-                <AppButton label="Edit task" variant="secondary" onPress={() => setEditing(true)} />
-                <AppButton label="Delete" variant="danger" onPress={deleteTask} />
-              </View>
+              {props.currentUser.role === "admin" && (
+                <View style={{ marginTop: 16, flexDirection: "row", gap: 8 }}>
+                  <AppButton label="Edit task" variant="secondary" onPress={() => setEditing(true)} />
+                  <AppButton label="Delete" variant="danger" onPress={deleteTask} />
+                </View>
+              )}
 
               <View style={styles.tabRow}>
-                <AppChip label={`Comments (${props.task?.comments.length || 0})`} active={tab === "comments"} onPress={() => setTab("comments")} />
+                <AppChip label="Comments" active={tab === "comments"} onPress={() => setTab("comments")} />
                 <AppChip label="Activity" active={tab === "activity"} onPress={() => setTab("activity")} />
               </View>
 
@@ -518,14 +577,42 @@ function TaskModal(props: {
                     <Text style={styles.bodyMuted}>No comments yet.</Text>
                   ) : props.task?.comments.map(c => {
                     const author = props.workspace.users.find(u => u.id === c.authorId);
+                    const isMine = c.authorId === props.currentUser.id;
+                    const isEditing = editingCommentId === c.id;
                     return (
                       <View key={c.id} style={styles.commentRow}>
                         <Avatar user={author} size={30} />
                         <View style={{ flex: 1 }}>
-                          <View style={styles.commentBubble}>
-                            <Text style={styles.body}>{c.text}</Text>
-                          </View>
-                          <Text style={styles.commentMeta}>{author?.name || "Someone"} · {formatRelTime(c.ts)}</Text>
+                          {isEditing ? (
+                            <View style={{ gap: 8 }}>
+                              <TextInput
+                                style={[styles.input, styles.textArea]}
+                                value={editingCommentText}
+                                onChangeText={setEditingCommentText}
+                                multiline
+                                autoFocus
+                                placeholderTextColor={COLORS.textMuted}
+                              />
+                              <View style={{ flexDirection: "row", gap: 8 }}>
+                                <AppButton label={busy ? "Saving..." : "Save"} onPress={saveEditComment} disabled={busy || !editingCommentText.trim()} />
+                                <AppButton label="Cancel" variant="ghost" onPress={cancelEditComment} disabled={busy} />
+                              </View>
+                            </View>
+                          ) : (
+                            <>
+                              <View style={styles.commentBubble}>
+                                <Text style={styles.body}>{c.text}</Text>
+                              </View>
+                              <View style={{ flexDirection: "row", alignItems: "center", gap: 12, marginTop: 4 }}>
+                                <Text style={[styles.commentMeta, { marginTop: 0 }]}>{author?.name || "Someone"} · {formatRelTime(c.ts)}</Text>
+                                {isMine && (
+                                  <Pressable onPress={() => startEditComment(c.id, c.text)} hitSlop={8}>
+                                    <Text style={[styles.commentMeta, { marginTop: 0, color: COLORS.accent, fontWeight: "700" }]}>Edit</Text>
+                                  </Pressable>
+                                )}
+                              </View>
+                            </>
+                          )}
                         </View>
                       </View>
                     );
@@ -554,21 +641,22 @@ function TaskModal(props: {
             </ScrollView>
           )}
 
+          {!editing && props.task && props.task.status !== "done" && (
+            <View style={{ marginTop: 12 }}>
+              <Text style={styles.fieldLabel}>Move task to</Text>
+              <DropdownInput
+                value={props.task.status}
+                options={STATUS_ORDER.map(s => ({ label: STATUS_LABELS[s], value: s }))}
+                onChange={v => {
+                  if (v && v !== props.task!.status) {
+                    props.onMoveStatus(props.task!.id, v as Status);
+                  }
+                }}
+              />
+            </View>
+          )}
+
           <View style={styles.sheetFoot}>
-            {!editing && props.task && props.currentUser.role === "user" && props.task.status !== "done" && (
-              <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
-                {props.task.status !== "review" && (
-                  <AppButton label="Mark blocked" variant="secondary" onPress={() => props.onMoveStatus(props.task!.id, "blocked")} />
-                )}
-                <AppButton label="Mark done" onPress={() => props.onMoveStatus(props.task!.id, "done")} />
-              </View>
-            )}
-            {!editing && props.task && props.currentUser.role === "admin" && (
-              <View style={{ flexDirection: "row", gap: 8 }}>
-                {isActiveStatus(props.task.status) && <AppButton label="Move to review" variant="secondary" onPress={() => props.onMoveStatus(props.task!.id, "review")} />}
-                <AppButton label="Mark done" onPress={() => props.onMoveStatus(props.task!.id, "done")} />
-              </View>
-            )}
             <View style={{ flex: 1 }} />
             <AppButton label="Close" variant="ghost" onPress={props.onClose} />
           </View>
@@ -622,6 +710,107 @@ function PickerInput(props: { value: string; options: { label: string; value: st
   );
 }
 
+function DropdownInput(props: { value: string; options: { label: string; value: string }[]; onChange: (value: string) => void; placeholder?: string }) {
+  const [open, setOpen] = React.useState(false);
+  const selected = props.options.find(item => item.value === props.value);
+
+  return (
+    <View style={styles.dropdownWrap}>
+      <Pressable onPress={() => setOpen(true)} style={({ pressed }) => [styles.dropdownButton, pressed && styles.buttonPressed]}>
+        <Text style={[styles.dropdownText, !selected && styles.dropdownPlaceholder]} numberOfLines={1}>
+          {selected?.label || props.placeholder || "Choose status"}
+        </Text>
+        <MaterialIcons name={open ? "keyboard-arrow-up" : "keyboard-arrow-down"} size={20} color={COLORS.textMuted} />
+      </Pressable>
+      {open && (
+        <View style={styles.dropdownMenu}>
+          {props.options.map(item => {
+            const active = item.value === props.value;
+            return (
+              <Pressable
+                key={`${item.value}-${item.label}`}
+                onPress={() => {
+                  props.onChange(item.value);
+                  setOpen(false);
+                }}
+                style={({ pressed }) => [styles.dropdownOption, active && styles.dropdownOptionActive, pressed && styles.buttonPressed]}
+              >
+                <Text style={[styles.dropdownOptionText, active && styles.dropdownOptionTextActive]}>{item.label}</Text>
+                {active && <MaterialIcons name="check" size={18} color={COLORS.accent} />}
+              </Pressable>
+            );
+          })}
+        </View>
+      )}
+    </View>
+  );
+}
+
+function dateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function calendarSectionLabel(dateStr: string | null) {
+  if (!dateStr) return "No due date";
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const target = new Date(`${dateStr}T00:00:00`);
+  const diff = Math.round((target.getTime() - today.getTime()) / 86400000);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Tomorrow";
+  if (diff === -1) return "Yesterday";
+  return target.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+}
+
+function CalendarListView(props: { tasks: Task[]; users: Profile[]; projects: Project[]; onOpen: (task: Task) => void }) {
+  const sections = React.useMemo(() => {
+    const dated = props.tasks
+      .filter(task => task.dueDate)
+      .sort((a, b) => (a.dueDate || "").localeCompare(b.dueDate || ""));
+    const undated = props.tasks.filter(task => !task.dueDate);
+    const groups = new Map<string | null, Task[]>();
+
+    dated.forEach(task => {
+      const key = task.dueDate || null;
+      groups.set(key, [...(groups.get(key) || []), task]);
+    });
+    if (undated.length) groups.set(null, undated);
+
+    return Array.from(groups.entries()).map(([dateStr, tasks]) => ({ dateStr, tasks }));
+  }, [props.tasks]);
+
+  return (
+    <SectionCard title="Calendar" subtitle="Tasks grouped by due date">
+      <View style={styles.calendarList}>
+        {sections.length === 0 ? (
+          <Text style={styles.bodyMuted}>No tasks match.</Text>
+        ) : sections.map(section => (
+          <View key={section.dateStr || "no-date"} style={styles.calendarSection}>
+            <View style={styles.calendarSectionHead}>
+              <Text style={styles.calendarSectionTitle}>{calendarSectionLabel(section.dateStr)}</Text>
+              <Text style={styles.calendarSectionCount}>{section.tasks.length}</Text>
+            </View>
+            <View style={{ gap: 10 }}>
+              {section.tasks.map(task => (
+                <TaskRow
+                  key={task.id}
+                  task={task}
+                  users={props.users}
+                  projects={props.projects}
+                  onOpen={props.onOpen}
+                />
+              ))}
+            </View>
+          </View>
+        ))}
+      </View>
+    </SectionCard>
+  );
+}
+
 function Toasts({ items, onDismiss }: { items: ToastItem[]; onDismiss: (id: string) => void }) {
   if (!items.length) return null;
   return (
@@ -662,8 +851,8 @@ function ConfirmDialog(props: { visible: boolean; title: string; message: string
 }
 
 export default function App() {
-  const { ready, session, profile, workspace, setWorkspace, reloadWorkspace, error, setError } = useSession();
-  const [tab, setTab] = React.useState<TabId>("dashboard");
+  const { ready, profile, workspace, setWorkspace, reloadWorkspace, error, setError } = useSession();
+  const [tab, setTab] = React.useState<TabId>("tasks");
   const [taskFilter, setTaskFilter] = React.useState<{ priority: Priority | null; status: Status | null }>({ priority: null, status: null });
   const [search, setSearch] = React.useState("");
   const [selectedTask, setSelectedTask] = React.useState<Task | null>(null);
@@ -687,7 +876,7 @@ export default function App() {
     }
   }, [reloadWorkspace, toast]);
 
-  const currentUser = profile || workspace.users.find(u => u.auth_user_id === session?.user.id) || null;
+  const currentUser = profile;
   const isAdmin = currentUser?.role === "admin";
 
   const visibleTasks = sortTasks(
@@ -708,10 +897,14 @@ export default function App() {
       return;
     }
     const admin = workspace.users.find(u => u.role === "admin");
+    if (task.status === "review" && !admin) {
+      toast("No admin user is available to receive review tasks.");
+      return;
+    }
     const nextTask: Task = {
       ...task,
-      assigneeId: task.status === "review" ? admin?.id || task.assigneeId : task.assigneeId,
-      activity: task.activity.length ? task.activity : [{ ts: new Date().toISOString().slice(0, 16), actor: currentUser.id, text: existing ? "edited task details" : "created task" }]
+      assigneeId: task.status === "review" ? admin!.id : task.assigneeId,
+      activity: task.activity.length ? task.activity : [{ ts: nowTimestamp(), actor: currentUser.id, text: existing ? "edited task details" : "created task" }]
     };
     try {
       if (existing) {
@@ -745,8 +938,12 @@ export default function App() {
       return;
     }
     const admin = workspace.users.find(u => u.role === "admin");
+    if (status === "review" && !admin) {
+      toast("No admin user is available to receive review tasks.");
+      return;
+    }
     const patch: Partial<Task> = { status };
-    if (status === "review" && admin) patch.assigneeId = admin.id;
+    if (status === "review") patch.assigneeId = admin!.id;
     try {
       const { error } = await supabase.from("tasks").update({ ...task, ...patch }).eq("id", taskId);
       if (error) throw error;
@@ -762,27 +959,6 @@ export default function App() {
       return;
     }
     await moveTask(task.id, "done");
-  };
-
-  const createProject = async () => {
-    const name = "New project";
-    try {
-      const { error } = await supabase.from("projects").insert({ id: id("p"), name, color: COLORS.accent });
-      if (error) throw error;
-      await refresh();
-    } catch (e: any) {
-      toast(e?.message || "Unable to create project.");
-    }
-  };
-
-  const deleteProject = async (projectId: string) => {
-    try {
-      const { error } = await supabase.from("projects").delete().eq("id", projectId);
-      if (error) throw error;
-      await refresh();
-    } catch (e: any) {
-      toast(e?.message || "Unable to delete project.");
-    }
   };
 
   const createUser = async () => {
@@ -813,22 +989,22 @@ export default function App() {
   };
 
   if (error) return <ErrorScreen message={error} />;
-  if (!ready || !session) return <LoadingScreen label="Loading workspace..." />;
-  if (!currentUser) {
-    return <AuthScreen onSignedIn={refresh} onToast={toast} />;
-  }
+  if (!ready) return <LoadingScreen label="Loading workspace..." />;
+  if (!currentUser) return <AuthScreen onToast={toast} />;
 
   const tabs = isAdmin ? ADMIN_TABS : USER_TABS;
-  const title = tab === "dashboard" ? "Dashboard" : tab === "tasks" ? (isAdmin ? "All tasks" : "My tasks") : tab === "board" ? "Board" : tab === "team" ? "Team members" : "Projects";
+  const title = tab === "dashboard" ? "Dashboard" : tab === "tasks" ? (isAdmin ? "All tasks" : "My tasks") : tab === "board" ? "Board" : tab === "calendar" ? "Calendar" : "Team members";
   const subtitle = tab === "dashboard"
     ? "Workload overview, priorities, and activity"
     : tab === "tasks"
       ? `${visibleTasks.length} tasks`
       : tab === "board"
         ? "Drag-style board"
-        : tab === "team"
-          ? "Manage members and access"
-          : "Create, edit, and remove workstreams";
+        : tab === "calendar"
+          ? "Tasks by due date"
+          : tab === "team"
+            ? "Manage members and access"
+            : "Create, edit, and remove workstreams";
 
   const openTask = (task: Task) => {
     setSelectedTask(task);
@@ -876,7 +1052,7 @@ export default function App() {
           />
           <FlatList
             horizontal
-            data={[{ label: "All statuses", value: "" }, ...STATUS_ORDER.filter(s => s !== "blocked").map(s => ({ label: STATUS_LABELS[s], value: s }))]}
+            data={[{ label: "All statuses", value: "" }, ...STATUS_ORDER.map(s => ({ label: STATUS_LABELS[s], value: s }))]}
             keyExtractor={item => `s-${item.value || "all"}`}
             showsHorizontalScrollIndicator={false}
             renderItem={({ item }) => (
@@ -901,7 +1077,7 @@ export default function App() {
               </View>
               <SectionCard title="Tasks by status" subtitle="Distribution across all tasks">
                 <View style={styles.statusRail}>
-                  {STATUS_ORDER.filter(s => s !== "blocked").map(s => (
+                  {STATUS_ORDER.map(s => (
                     <View key={s} style={styles.statusRow}>
                       <Text style={styles.statusLabel}>{STATUS_LABELS[s]}</Text>
                       <View style={styles.statusBarTrack}>
@@ -916,16 +1092,14 @@ export default function App() {
           )}
 
           {tab === "tasks" && (
-            <SectionCard title={isAdmin ? "All tasks" : "My tasks"} subtitle="Tap a task to open details">
-              <View style={{ gap: 10 }}>
-                {visibleTasks.length === 0 ? <Text style={styles.bodyMuted}>No tasks match.</Text> : visibleTasks.map(task => <TaskRow key={task.id} task={task} users={workspace.users} projects={workspace.projects} onOpen={openTask} onToggleDone={isAdmin ? toggleDone : undefined} />)}
-              </View>
+            <SectionCard title={isAdmin ? "All tasks" : "My tasks"} subtitle="Grouped by project">
+              <ProjectGroupedTasks tasks={visibleTasks} users={workspace.users} projects={workspace.projects} onOpen={openTask} onToggleDone={isAdmin ? toggleDone : undefined} />
             </SectionCard>
           )}
 
           {tab === "board" && (
             <View style={styles.boardWrap}>
-              {STATUS_ORDER.filter(s => s !== "blocked").map(status => {
+              {STATUS_ORDER.map(status => {
                 const colTasks = visibleTasks.filter(t => t.status === status);
                 return (
                   <SectionCard key={status} title={STATUS_LABELS[status]} subtitle={`${colTasks.length} tasks`} style={styles.boardColumn}>
@@ -936,6 +1110,10 @@ export default function App() {
                 );
               })}
             </View>
+          )}
+
+          {tab === "calendar" && (
+            <CalendarListView tasks={visibleTasks} users={workspace.users} projects={workspace.projects} onOpen={openTask} />
           )}
 
           {tab === "team" && isAdmin && (
@@ -952,27 +1130,6 @@ export default function App() {
                     <View style={styles.badge}><Text style={styles.badgeText}>{user.role === "admin" ? "Admin" : user.title || "User"}</Text></View>
                   </View>
                 ))}
-              </View>
-            </SectionCard>
-          )}
-
-          {tab === "projects" && (
-            <SectionCard title="Projects" subtitle="Create, edit, and remove workstreams">
-              <View style={{ gap: 12 }}>
-                {isAdmin && <AppButton label="New project" icon="add" onPress={createProject} />}
-                {workspace.projects.map(project => {
-                  const count = workspace.tasks.filter(t => t.projectId === project.id && t.status !== "done").length;
-                  return (
-                    <View key={project.id} style={styles.projectRow}>
-                      <View style={[styles.projectSwatch, { backgroundColor: project.color }]} />
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.personName}>{project.name}</Text>
-                        <Text style={styles.personMeta}>{count} open tasks</Text>
-                      </View>
-                      {isAdmin && <AppButton label="Delete" variant="ghost" onPress={() => setConfirm({ title: "Delete project", message: `Delete ${project.name}? Tasks will remain but become unassigned from the project.`, confirmLabel: "Delete project", kind: "danger", onConfirm: () => deleteProject(project.id) })} />}
-                    </View>
-                  );
-                })}
               </View>
             </SectionCard>
           )}
@@ -1020,7 +1177,7 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: COLORS.bg },
+  safe: { flex: 1, backgroundColor: COLORS.bg, paddingTop: Platform.OS === "android" ? RNStatusBar.currentHeight : 0 },
   screen: { flex: 1, backgroundColor: COLORS.bg },
   loadingWrap: { flex: 1, backgroundColor: COLORS.bg, alignItems: "center", justifyContent: "center", padding: 24 },
   loadingCard: { alignItems: "center", gap: 16, backgroundColor: COLORS.surface, padding: 24, borderRadius: 24, width: "100%", maxWidth: 340, ...SHADOW },
@@ -1029,8 +1186,8 @@ const styles = StyleSheet.create({
   brandMarkText: { color: "#fff", fontWeight: "800" },
   brandName: { color: COLORS.text, fontSize: 16, fontWeight: "700" },
   brandSub: { color: COLORS.textMuted, fontSize: 12 },
-  authScroll: { flexGrow: 1, backgroundColor: COLORS.bg },
-  authShell: { flex: 1, padding: 20, gap: 16 },
+  authScroll: { flexGrow: 1, backgroundColor: COLORS.bg, justifyContent: "center", padding: 20 },
+  authShell: { width: "100%", maxWidth: 420, alignSelf: "center" },
   authPanel: { backgroundColor: COLORS.surface, borderRadius: 24, padding: 20, ...SHADOW },
   authArt: { backgroundColor: COLORS.surface, borderRadius: 24, padding: 20, ...SHADOW, minHeight: 180, justifyContent: "flex-end" },
   authArtCard: { backgroundColor: COLORS.accentSoft, borderRadius: 20, padding: 18 },
@@ -1056,6 +1213,20 @@ const styles = StyleSheet.create({
   fieldLabel: { color: COLORS.text, fontWeight: "700", fontSize: 12, marginBottom: 6 },
   input: { minHeight: 48, borderRadius: 14, backgroundColor: COLORS.surfaceSoft, borderWidth: 1, borderColor: COLORS.border, paddingHorizontal: 14, color: COLORS.text },
   textArea: { minHeight: 100, paddingTop: 12, textAlignVertical: "top" },
+  pickerWrap: { marginTop: 2 },
+  pickerItem: { minHeight: 34, paddingHorizontal: 12, borderRadius: 999, backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.border, alignItems: "center", justifyContent: "center", marginRight: 8 },
+  pickerItemActive: { backgroundColor: COLORS.accentSoft, borderColor: COLORS.accent },
+  pickerText: { color: COLORS.textSoft, fontSize: 12, fontWeight: "700" },
+  pickerTextActive: { color: COLORS.accent },
+  dropdownWrap: { gap: 6 },
+  dropdownButton: { minHeight: 48, borderRadius: 14, backgroundColor: COLORS.surfaceSoft, borderWidth: 1, borderColor: COLORS.border, paddingHorizontal: 14, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  dropdownText: { flex: 1, color: COLORS.text, fontSize: 14, fontWeight: "700" },
+  dropdownPlaceholder: { color: COLORS.textMuted },
+  dropdownMenu: { backgroundColor: COLORS.surface, borderRadius: 14, padding: 6, borderWidth: 1, borderColor: COLORS.border, ...SHADOW },
+  dropdownOption: { minHeight: 48, borderRadius: 12, paddingHorizontal: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
+  dropdownOptionActive: { backgroundColor: COLORS.accentSoft },
+  dropdownOptionText: { color: COLORS.textSoft, fontSize: 14, fontWeight: "700" },
+  dropdownOptionTextActive: { color: COLORS.accent },
   button: { minHeight: 48, borderRadius: 14, paddingHorizontal: 16, alignItems: "center", justifyContent: "center", flexDirection: "row" },
   button_primary: { backgroundColor: COLORS.accent },
   button_secondary: { backgroundColor: COLORS.accentSoft },
@@ -1090,11 +1261,21 @@ const styles = StyleSheet.create({
   statusCount: { color: COLORS.textMuted, fontSize: 12, fontWeight: "700" },
   boardWrap: { gap: 12 },
   boardColumn: { minHeight: 140 },
+  calendarList: { gap: 16 },
+  calendarSection: { gap: 10 },
+  calendarSectionHead: { flexDirection: "row", alignItems: "center", gap: 10 },
+  calendarSectionTitle: { flex: 1, color: COLORS.text, fontSize: 14, fontWeight: "900" },
+  calendarSectionCount: { minWidth: 28, textAlign: "center", color: COLORS.accent, backgroundColor: COLORS.accentSoft, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3, fontSize: 12, fontWeight: "900" },
   personRow: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, borderRadius: 16, backgroundColor: COLORS.surfaceSoft, borderWidth: 1, borderColor: COLORS.border },
   personName: { color: COLORS.text, fontSize: 14, fontWeight: "800" },
   personMeta: { color: COLORS.textMuted, fontSize: 12, marginTop: 2 },
   projectRow: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, borderRadius: 16, backgroundColor: COLORS.surfaceSoft, borderWidth: 1, borderColor: COLORS.border },
   projectSwatch: { width: 12, height: 12, borderRadius: 4 },
+  projectTaskList: { gap: 16 },
+  projectTaskSection: { gap: 10 },
+  projectTaskHead: { flexDirection: "row", alignItems: "center", gap: 10 },
+  projectTaskTitle: { flex: 1, color: COLORS.text, fontSize: 14, fontWeight: "900" },
+  projectTaskCount: { minWidth: 28, textAlign: "center", color: COLORS.accent, backgroundColor: COLORS.accentSoft, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3, fontSize: 12, fontWeight: "900" },
   tabBar: { flexDirection: "row", justifyContent: "space-around", alignItems: "center", paddingVertical: 10, paddingBottom: Math.max(16, Platform.OS === "android" ? 18 : 10), backgroundColor: COLORS.surface, borderTopWidth: 1, borderTopColor: COLORS.border },
   tabItem: { alignItems: "center", gap: 4, minWidth: 54 },
   tabText: { color: COLORS.textMuted, fontSize: 11, fontWeight: "700" },

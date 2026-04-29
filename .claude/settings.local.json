@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(npx supabase@latest --version)",
+      "Bash(npx supabase@latest db push --dry-run)",
+      "Bash(npx supabase@latest migration list)",
+      "Bash(npx supabase@latest functions deploy create-user --use-api)",
+      "Bash(psql --version)",
+      "Bash(C:/Users/Sasha/AppData/Local/Android/Sdk/platform-tools/adb devices *)",
+      "Bash(\"C:/Users/Sasha/AppData/Local/Android/Sdk/platform-tools/adb\" kill-server *)",
+      "Bash(\"C:/Users/Sasha/AppData/Local/Android/Sdk/platform-tools/adb\" start-server *)",
+      "Bash(\"C:/Users/Sasha/AppData/Local/Android/Sdk/platform-tools/adb\" devices *)",
+      "Bash(npx supabase@latest db push)"
+    ]
+  }
+}

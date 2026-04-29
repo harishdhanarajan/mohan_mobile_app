@@ -37,21 +37,31 @@ export const formatDue = (iso?: string | null) => {
 };
 
 export const formatRelTime = (ts: string) => {
-  const d = new Date(ts);
+  const normalized = /(?:z|[+-]\d{2}:\d{2})$/i.test(ts) ? ts : `${ts}Z`;
+  const d = new Date(normalized);
+  if (Number.isNaN(d.getTime())) return "";
   const now = new Date();
-  const diff = (now.getTime() - d.getTime()) / 1000;
+  const diff = Math.max(0, (now.getTime() - d.getTime()) / 1000);
   if (diff < 60) return "just now";
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  if (diff <= 43200) return `${Math.floor(diff / 3600)}h ago`;
+  return d.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true
+  });
 };
+
+export const nowTimestamp = () => new Date().toISOString();
 
 export const STATUS_LABELS: Record<Status, string> = {
   todo: "To Do",
   "in-progress": "In Progress",
   review: "Review",
-  blocked: "Blocked",
   done: "Done"
 };
 
@@ -61,7 +71,7 @@ export const PRIORITY_LABELS: Record<Priority, string> = {
   low: "Low"
 };
 
-export const STATUS_ORDER: Status[] = ["todo", "in-progress", "review", "blocked", "done"];
+export const STATUS_ORDER: Status[] = ["todo", "in-progress", "review", "done"];
 export const ACTIVE_STATUSES: Status[] = ["todo", "in-progress", "review"];
 
 export const id = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;

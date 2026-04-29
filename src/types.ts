@@ -1,5 +1,5 @@
 export type Role = "admin" | "user";
-export type Status = "todo" | "in-progress" | "review" | "blocked" | "done";
+export type Status = "todo" | "in-progress" | "review" | "done";
 export type Priority = "high" | "medium" | "low";
 
 export type Profile = {

@@ -1,5 +1,4 @@
 import { supabase } from "./supabase";
-import { id } from "./utils";
 import type { NotificationItem, Profile, Project, Task, WorkspaceState } from "./types";
 
 export async function loadWorkspace() {
@@ -21,6 +20,12 @@ export async function loadWorkspace() {
   } satisfies WorkspaceState;
 }
 
+export async function signIn(email: string, password: string) {
+  const cleanEmail = email.trim().toLowerCase();
+  const { error } = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
+  if (error) throw error;
+}
+
 export async function loadProfileByAuthUser(authUserId: string) {
   const { data, error } = await supabase
     .from("users")
@@ -31,22 +36,7 @@ export async function loadProfileByAuthUser(authUserId: string) {
   return data as Profile | null;
 }
 
-export async function bootstrapAdminProfile(input: { authUserId: string; name: string; email: string; password: string }) {
-  const payload: Profile = {
-    id: id("u"),
-    auth_user_id: input.authUserId,
-    name: input.name,
-    email: input.email,
-    password: input.password,
-    role: "admin",
-    title: "Administrator"
-  };
-  const { error } = await supabase.from("users").insert(payload);
-  if (error) throw error;
-  return payload;
-}
-
 export async function signOut() {
-  const { error } = await supabase.auth.signOut();
+  const { error } = await supabase.auth.signOut({ scope: "local" });
   if (error) throw error;
 }

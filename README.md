@@ -15,6 +15,15 @@ EXPO_PUBLIC_SUPABASE_ANON_KEY=your_anon_key_here
 3. Deploy the `create-user` Edge Function if you want admin-created users from inside the app.
 4. Run `npm run android`.
 
+## Supabase CLI flow
+
+```powershell
+cd C:\Users\Sasha\Desktop\mohan_app_users
+npx supabase@latest link --project-ref aeugzumthwtuykonfyiz
+npx supabase@latest db push
+npx supabase@latest functions deploy create-user
+```
+
 ## Auth model
 
 - Login is handled by Supabase Auth.

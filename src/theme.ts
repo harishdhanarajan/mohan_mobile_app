@@ -25,8 +25,7 @@ export const COLORS = {
   todo: "#64748b",
   progress: "#2563eb",
   review: "#7c3aed",
-  done: "#16a34a",
-  blocked: "#dc2626"
+  done: "#16a34a"
 };
 
 export const SHADOW = {
